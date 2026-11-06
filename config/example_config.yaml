@@ -1,0 +1,34 @@
+# oligo_site_finder example config. Paths are examples: point them at your own files.
+
+# GENCODE GTF (transcript lines with gene_name, gene_type, transcript_type and tag attributes)
+gtf: /path/to/gencode.v47.primary_assembly.annotation.gtf
+
+# optional: two columns, chromosome and length (keeps TSS windows inside chromosome ends)
+chrom_sizes: /path/to/hg38.chrom.sizes
+
+# one peak FILE per sample (each holds all of that sample's peaks). LanceOtron output works as it is; for another
+# peak caller see "Peak files" in the README. List as many samples as you like: a promoter counts as open if any
+# sample has a peak there, and every sample's strong peak votes on the summit. Give only your own cell type if you
+# want sites from that cell type alone. The 2026 genome-wide panels used these five:
+peaks:
+  CD4_stim: /path/to/CD4_stim_peaks.bed
+  CD8_stim: /path/to/CD8_stim_peaks.bed
+  CD19_stim: /path/to/CD19_stim_peaks.bed
+  macrophage_stim: /path/to/macrophage_stim_peaks.bed
+  CD14_unstim: /path/to/CD14_unstim_peaks.bed
+
+# optional: a file with one gene symbol per line; leave out for every gene in the GTF selection
+# genes: /path/to/my_genes.txt
+
+outdir: sitefinder_out
+
+# defaults (shown here; leave out to use them)
+chromosomes: [chr1, chr2, chr3, chr4, chr5, chr6, chr7, chr8, chr9, chr10, chr11, chr12, chr13, chr14, chr15, chr16,
+              chr17, chr18, chr19, chr20, chr21, chr22, chrX, chrY]
+gene_type: protein_coding         # set to null to keep every gene type
+transcript_type: protein_coding   # set to null to keep every transcript type
+min_score: 0.5                    # a peak counts if its score is at least this
+strong_score: 0.8                 # strong peak; only strong peaks vote on the consensus summit
+tss_window: 250                   # the peak must overlap TSS +/- this many bp ...
+max_summit_distance: 1000         # ... and its summit must be within this many bp of the TSS
+region_length: 120                # output region, centred on the chosen site (the oligo pipeline needs 120)
