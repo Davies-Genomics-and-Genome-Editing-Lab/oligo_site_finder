@@ -13,12 +13,12 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from .sites import best_peak_per_gene, choose_sites, load_peaks, regions
+from .sites import assign_regions, best_peak_per_gene, choose_sites, load_peaks, regions
 from .tss import extract_tss
 
 DEFAULTS = dict(chromosomes=[f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"], gene_type="protein_coding",
                 transcript_type="protein_coding", genes=None, chrom_sizes=None, min_score=0.5, strong_score=0.8,
-                tss_window=250, max_summit_distance=1000, region_length=120)
+                tss_window=250, max_summit_distance=1000, region_length=120, min_site_spacing=None, no_peak="tss")
 
 
 def run(cfg: dict) -> pd.DataFrame:
@@ -47,9 +47,19 @@ def run(cfg: dict) -> pd.DataFrame:
         hits[label] = best_peak_per_gene(tss, p, c["tss_window"], c["max_summit_distance"], sizes)
         print(f"{label}: {len(p):,} peaks >= {c['min_score']}; peak at {len(hits[label]):,} TSSs")
     sites = choose_sites(tss, hits, c["strong_score"], c["min_score"])
+    spacing = c["region_length"] if c["min_site_spacing"] is None else c["min_site_spacing"]
+    sites = assign_regions(sites, spacing, c["no_peak"])
     sites.to_csv(out / "sites.tsv", sep="\t", index=False)
-    regions(sites, c["region_length"]).to_csv(out / "regions.bed", sep="\t", index=False)
-    print(f"classes: {sites.peak_class.value_counts().to_dict()} -> {out / 'regions.bed'}, {out / 'sites.tsv'}")
+    r = regions(sites, c["region_length"])
+    r.to_csv(out / "regions.bed", sep="\t", index=False)
+    shared = sites[sites.region_genes.str.contains(",")]
+    skipped = int((sites.region == "").sum())
+    print(f"classes: {sites.peak_class.value_counts().to_dict()}")
+    print(f"regions: {len(r):,} for {len(sites) - skipped:,} genes; {len(shared):,} genes share {shared.region.nunique():,} "
+          f"regions (sites < {spacing} bp apart, e.g. bidirectional promoters; see region_genes in sites.tsv)"
+          + (f"; {skipped:,} genes with no peak skipped" if skipped else
+             f"; {int((sites.peak_class == 'none').sum()):,} genes with no peak placed on their TSS (no_peak: skip leaves them out)"))
+    print(f"-> {out / 'regions.bed'}, {out / 'sites.tsv'}")
     return sites
 
 

@@ -11,6 +11,8 @@ A gene with no peak gets its TSS.
 """
 from __future__ import annotations
 
+import bisect
+
 import numpy as np
 import pandas as pd
 
@@ -95,8 +97,54 @@ def choose_sites(tss: pd.DataFrame, hits_by_sample: dict, strong_score: float, m
     return pd.DataFrame(rows)
 
 
+CLASS_RANK = {"strong": 2, "weak": 1, "none": 0}
+
+
+def assign_regions(sites: pd.DataFrame, min_spacing: int, no_peak: str = "tss") -> pd.DataFrame:
+    """Give each gene a region, so that no two regions' sites are closer than min_spacing.
+
+    no_peak: "tss" keeps genes with no peak (their site is the TSS); "skip" leaves them without a region.
+    Genes are taken best first: peak class, then support, then score, then the site closest to the gene's own TSS,
+    then gene name. A gene gets its own region if no region already taken is within min_spacing of its site;
+    otherwise it shares the nearest such region (e.g. two genes at one bidirectional promoter get one oligo).
+    min_spacing 0 gives every gene its own region, even where regions overlap.
+
+    Adds three columns: region (the gene the region is named after; "" if skipped), region_site (its centre) and
+    region_genes (every gene in that region, comma-separated).
+    """
+    if no_peak not in ("tss", "skip"):
+        raise ValueError(f"no_peak must be 'tss' or 'skip', not {no_peak!r}")
+    s = sites.copy()
+    use = s.peak_class != "none" if no_peak == "skip" else pd.Series(True, index=s.index)
+    order = s[use].assign(_c=s.peak_class.map(CLASS_RANK), _d=(s.site - s.tss).abs()).sort_values(
+        ["_c", "site_support", "site_score", "_d", "gene"], ascending=[False, False, False, True, True], kind="stable")
+    taken = {}                     # chr -> [sorted sites, region named at each, order in which each was taken]
+    region, region_site = {}, {}
+    for g in order.itertuples(index=False):
+        pos, name, rank = taken.setdefault(g.chr, ([], [], []))
+        k = bisect.bisect_left(pos, g.site)
+        near = [j for j in (k - 1, k) if 0 <= j < len(pos) and abs(pos[j] - g.site) < min_spacing]
+        if near:                   # share the nearest region; on a tie, the one taken first
+            j = min(near, key=lambda j: (abs(pos[j] - g.site), rank[j]))
+            region[g.gene], region_site[g.gene] = name[j], pos[j]
+        else:
+            pos.insert(k, g.site)
+            name.insert(k, g.gene)
+            rank.insert(k, len(rank))
+            region[g.gene], region_site[g.gene] = g.gene, g.site
+    s["region"] = s.gene.map(region).fillna("")
+    s["region_site"] = s.gene.map(region_site).astype("Int64")
+    members = s[s.region != ""].groupby("region").gene.agg(lambda x: ",".join(sorted(x)))
+    s["region_genes"] = s.region.map(members).fillna("")
+    return s
+
+
 def regions(sites: pd.DataFrame, length: int) -> pd.DataFrame:
-    """A `length`-bp region centred on each site, in the oligo design pipeline's region_list format."""
+    """A `length`-bp region centred on each region's site, in the oligo design pipeline's region_list format.
+
+    Only genes that carry a region (region == gene) are written; the others share one or were skipped.
+    """
+    sites = sites[sites.region == sites.gene]
     r = pd.DataFrame({"chr": sites.chr, "oligo_start": sites.site - length // 2, "oligo_stop": sites.site - length // 2 + length,
                       "gene": sites.gene})
     if (r.oligo_start < 0).any():

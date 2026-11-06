@@ -2,7 +2,8 @@
 
 Makes the regions file for the lab's [oligo design pipeline](https://github.com/Davies-Genomics-and-Genome-Editing-Lab/oligo_design_pipeline)
 when you want capture oligos at **promoters**. For each gene it picks one site, the ATAC peak summit at the gene's
-TSS (or the TSS itself if there is no peak), and writes a 120 bp region centred on it.
+TSS (or the TSS itself if there is no peak), and writes a 120 bp region centred on it. Genes that share a promoter
+(e.g. bidirectional pairs) share one region, so no two oligos in your panel overlap.
 
 The oligo design pipeline used to do this step itself (its `promoter` option). That option was retired in August
 2026, and the pipeline now needs a ready-made regions file (`region_list`). This repo makes that file. The oligo
@@ -54,8 +55,8 @@ are LanceOtron's 0–1 peak score and mean nothing for a MACS2 score.
 
 ## Outputs (in `outdir`)
 
-- **`regions.bed`**: one 120 bp region per gene, centred on its site, with the header `chr oligo_start oligo_stop gene`.
-  This is the pipeline's `region_list`.
+- **`regions.bed`**: one 120 bp region per site, with the header `chr oligo_start oligo_stop gene`. This is the
+  pipeline's `region_list`. A region shared by several genes is named after one of them (see below).
 - **`sites.tsv`**: one row per gene, showing how the site was chosen:
 
 | Column | Meaning |
@@ -66,6 +67,8 @@ are LanceOtron's 0–1 peak score and mean nothing for a MACS2 score.
 | `site`, `site_source` | The chosen position, and whether it is a `consensus_summit` or the `tss` |
 | `site_sample`, `site_score`, `site_support` | Which sample's summit was chosen, its score, and how many samples' strong peaks overlap it |
 | `site_offset_from_tss` | The site relative to the TSS in bp (negative = upstream) |
+| `region`, `region_site` | The region this gene's oligo is in (named after a gene) and its centre; empty if skipped |
+| `region_genes` | Every gene in that region, comma-separated. More than one name = a shared promoter |
 
 ## How a site is chosen
 
@@ -80,6 +83,11 @@ are LanceOtron's 0–1 peak score and mean nothing for a MACS2 score.
    vote. A peak's support is the number of strong peaks overlapping it, itself included. The most-supported peak wins.
    Ties go to the summit closest to the TSS, then to the first sample in alphabetical order of label. A gene with no
    peak gets its TSS.
+5. **One region per site**: genes are taken best first (peak class, then support, then score, then the site closest
+   to the gene's own TSS, then name). A gene gets its own region unless a region already taken is closer than
+   `min_site_spacing` (default 120 bp, so regions never overlap). In that case it shares that region, so it is not
+   lost, and `region_genes` lists it. Example: GANC and TMEM87A start at the same promoter, so they get one oligo,
+   named GANC, with `region_genes` = `GANC,TMEM87A`. Across all protein-coding genes, about 10% share a region this way.
 
 ## Settings (all optional; defaults shown)
 
@@ -92,11 +100,19 @@ are LanceOtron's 0–1 peak score and mean nothing for a MACS2 score.
 | `tss_window` | 250 | The peak must overlap TSS ± this many bp ... |
 | `max_summit_distance` | 1000 | ... and its summit must be within this many bp of the TSS |
 | `region_length` | 120 | Must equal the pipeline's oligo length for single best mode |
+| `min_site_spacing` | 120 (= `region_length`) | Sites closer than this share one region. Raise it to keep viewpoints further apart; 0 gives every gene its own region even where they overlap (only for genes split across separate captures) |
+| `no_peak` | `tss` | Genes with no peak: `tss` puts their oligo on the TSS (e.g. inactive promoters as controls); `skip` leaves them out |
 
 ## Notes
 
 - **Several cell types** mean that a promoter open in any of them gets its summit. If you want sites from your own
   cell type only, give only that sample.
-- **Genes with no peak still get a region**, on the TSS, so inactive promoters can be designed too. If you want only
-  genes with a peak, keep the `regions.bed` rows whose gene has `peak_class` `strong` or `weak` in `sites.tsv`.
-- **Tests:** `python -m pytest tests` checks every rule, and both LanceOtron layouts, on a tiny made-up genome.
+- **Genes with no peak** get an oligo on their TSS by default. Set `no_peak: skip` if you want only genes with a peak.
+  The run prints how many there are either way.
+- **Check the designed oligos too.** This repo works on positions, so it cannot see sequence. Two things only show
+  up after design:
+  - Redesign in the oligo pipeline can move an oligo up to `pad` bp, so check the final list for overlaps.
+  - An oligo whose 120 bp also occurs elsewhere in the genome (paralog families such as SPDYE, CT45A or TSPY) captures
+    every copy, and its reads cannot be placed.
+- **Tests:** `python -m pytest tests` checks every rule, shared sites, `no_peak` and both LanceOtron layouts on a tiny
+  made-up genome.
