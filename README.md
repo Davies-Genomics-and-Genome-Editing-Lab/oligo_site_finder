@@ -34,12 +34,12 @@ region_list: /path/to/outdir/regions.bed
 
 | Input | What it is |
 |---|---|
-| `gtf` | A **GENCODE** GTF for your genome build, e.g. `gencode.v47.primary_assembly.annotation.gtf` from [gencodegenes.org](https://www.gencodegenes.org/human/). It needs chr-prefixed names and the `gene_name`, `gene_type` and `transcript_type` attributes; its `MANE_Select` and `appris_principal_1` tags pick the TSS. Ensembl and RefSeq GTFs are not supported (the run stops with a message if no genes are found). |
+| `gtf` | A **GENCODE** GTF for your genome build, e.g. `gencode.v47.primary_assembly.annotation.gtf.gz` from [gencodegenes.org](https://www.gencodegenes.org/human/) (gzipped or not). It needs chr-prefixed names and the `gene_name`, `gene_type` and `transcript_type` attributes; its `MANE_Select` and `appris_principal_1` tags pick the TSS. Ensembl and RefSeq GTFs are not supported (the run stops and says why). |
 | `peaks` | One ATAC peak file per sample, as `label: path`. See [Peak files](#peak-files). |
 | `genes` | Optional. A text file with one gene symbol per line. Leave it out to get every protein-coding gene. |
 | `chrom_sizes` | Optional. Two columns, chromosome and length. It keeps TSS windows inside chromosome ends. |
 
-The GTF and the peaks must be on the same genome build.
+The GTF and the peaks must be on the same genome build. The run checks this (see [Checks](#checks)).
 
 ### Peak files
 
@@ -69,6 +69,8 @@ are LanceOtron's 0–1 peak score and mean nothing for a MACS2 score.
 | `site_offset_from_tss` | The site relative to the TSS in bp (negative = upstream) |
 | `region`, `region_site` | The region this gene's oligo is in (named after a gene) and its centre; empty if skipped |
 | `region_genes` | Every gene in that region, comma-separated. More than one name = a shared promoter |
+
+- **`genes_not_found.txt`**: only if you gave a `genes` list and some of its genes are not in the GTF selection.
 
 ## How a site is chosen
 
@@ -102,6 +104,32 @@ are LanceOtron's 0–1 peak score and mean nothing for a MACS2 score.
 | `region_length` | 120 | Must equal the pipeline's oligo length for single best mode |
 | `min_site_spacing` | 120 (= `region_length`) | Sites closer than this share one region. Raise it to keep viewpoints further apart; 0 gives every gene its own region even where they overlap (only for genes split across separate captures) |
 | `no_peak` | `tss` | Genes with no peak: `tss` puts their oligo on the TSS (e.g. inactive promoters as controls); `skip` leaves them out |
+| `build_check` | `true` | Stop if a peak file looks like it is on a different genome build from the GTF (see [Checks](#checks)) |
+
+## Checks
+
+The run checks its inputs before writing anything. If something is wrong, it stops with `ERROR:`, the file
+concerned and how to fix it. It stops when:
+
+- **A setting is missing, misspelt or invalid**, e.g. `no_peaks: skip` gives *did you mean 'no_peak'?*. A listed
+  file does not exist.
+- **The GTF gives no genes.** The message says why: chromosome names without `chr` (Ensembl style), missing
+  `gene_type` attributes, or a `gene_type` that is not in the file.
+- **A peak file:**
+  - has no header (a MACS2 narrowPeak is recognised, and the message gives the command to convert it);
+  - names chromosomes `1, 2, ...` instead of `chr1, chr2, ...` (the message gives the command to add the prefix);
+  - has summits outside their own peaks (an offset from start, not a position);
+  - has scores above 1 while `min_score` and `strong_score` are left at LanceOtron's defaults;
+  - has no peak at or above `min_score`.
+- **The peaks look like a different genome build from the GTF.** Each sample's peaks should sit at TSSs far more
+  often than chance. The run counts TSSs with a peak, moves every peak 1 Mb and counts again, and prints the ratio.
+  On GENCODE v47, ATAC peaks on the right build gave 16–25×, CTCF ChIP 8×, and the same ATAC peaks lifted over to
+  hg19 2×. The run stops below 5×. With fewer than 500 peaks the ratio is too noisy, so it skips the check and says
+  so. If a file is right but still below 5×, set `build_check: false`.
+- **`chrom_sizes` is from another build**: TSSs or peaks lie past a chromosome's end.
+- **None of the `genes` are found** (e.g. Ensembl IDs instead of symbols). If only some are missing, the run goes
+  on, writes them to `genes_not_found.txt` and prints a NOTE: wrong letter case, a renamed symbol (MARCH1 is now
+  MARCHF1) or not protein-coding.
 
 ## Notes
 

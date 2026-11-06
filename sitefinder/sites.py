@@ -24,24 +24,72 @@ COLUMN_NAMES = {"chrom": ["chrom", "chromosome", "chr"], "start": ["start"], "en
                 "score": ["score", "overall_peak_score"], "summit": ["summit", "max_coverage_position"]}
 
 
+class InputError(ValueError):
+    """A problem with an input file or setting. The message names the file and how to fix it."""
+
+
+def _is_number(s) -> bool:
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
 def load_peaks(path: str, min_score: float, chromosomes: list[str]) -> pd.DataFrame:
-    """Peaks from a tab-separated file with a header line: LanceOtron output as it comes, or chrom start end score summit."""
-    p = pd.read_csv(path, sep="\t")
+    """Peaks from a tab-separated file with a header line: LanceOtron output as it comes, or chrom start end score summit.
+
+    Stops with an InputError naming the fix if the file has no header (e.g. MACS2 narrowPeak), its chromosome names
+    do not match (e.g. 1 instead of chr1), its summits are not genome positions, or no peak passes min_score.
+    """
+    p = pd.read_csv(path, sep="\t", low_memory=False)
+    cols = [str(c) for c in p.columns]
+    if len(cols) >= 3 and _is_number(cols[1]) and _is_number(cols[2]):       # the first line is a peak, not a header
+        fix = ""
+        if len(cols) == 10:
+            fix = ("\nIt looks like MACS2 narrowPeak, whose summit (column 10) is an offset from start. Convert it with\n"
+                   f"  (printf 'chrom\\tstart\\tend\\tscore\\tsummit\\n'; awk 'BEGIN{{OFS=\"\\t\"}} {{print $1, $2, $3, $7, $2 + $10}}' "
+                   f"{path}) > {path}.tsv\nand set min_score and strong_score on the scale of column 7 (signalValue).")
+        raise InputError(f"{path}: no header line; the first line is a peak ({' '.join(cols[:3])} ...). The file needs a "
+                         f"header naming chrom, start, end, score, summit (LanceOtron output has one).{fix}")
     lower = {c.lower(): c for c in p.columns}
     use, missing = {}, []
     for col, names in COLUMN_NAMES.items():
         found = [lower[n] for n in names if n in lower]
         if len(found) > 1:
-            raise ValueError(f"{path}: more than one column could be {col}: {found}")
+            raise InputError(f"{path}: more than one column could be {col}: {found}")
         if found:
             use[found[0]] = col
         else:
             missing.append(col)
     if missing:
-        raise ValueError(f"{path}: no column for {missing}. Need a header line naming chrom, start, end, score, summit "
+        raise InputError(f"{path}: no column for {missing}. Need a header line naming chrom, start, end, score, summit "
                          f"(LanceOtron output works as it is); found {list(p.columns)}")
     p = p.rename(columns=use)[PEAK_COLUMNS]
-    return p[p.chrom.isin(chromosomes) & (p.score >= min_score)].reset_index(drop=True)
+    for col in ("start", "end", "score", "summit"):
+        if not pd.api.types.is_numeric_dtype(p[col]):
+            bad = p[col][pd.to_numeric(p[col], errors="coerce").isna()].iloc[0]
+            raise InputError(f"{path}: the {col} column is not all numbers (e.g. {bad!r})")
+    p["chrom"] = p.chrom.astype(str)
+    on = p.chrom.isin(chromosomes)
+    if not on.any():
+        names = list(p.chrom.value_counts().index[:4])
+        fix = ""
+        if any(f"chr{n}" in chromosomes for n in names):
+            fix = ("\nThey lack the 'chr' prefix (Ensembl style). Add it with\n"
+                   f"  awk 'BEGIN{{FS = OFS = \"\\t\"}} NR > 1 {{$1 = \"chr\" $1}} 1' {path} > {path}.chr.tsv")
+        raise InputError(f"{path}: no peak is on the chosen chromosomes ({', '.join(chromosomes[:3])}, ...); this file's "
+                         f"chromosomes are {names}.{fix}")
+    outside = ~p.summit.between(p.start, p.end)
+    if outside.mean() > 0.01:
+        raise InputError(f"{path}: {outside.mean():.0%} of summits lie outside their own peak, so the summit column is "
+                         f"not the summit's genome position. If it is an offset from start (as in MACS2 narrowPeak "
+                         f"column 10), use start + offset.")
+    kept = p[on & (p.score >= min_score)]
+    if kept.empty:
+        raise InputError(f"{path}: no peak on the chosen chromosomes scores >= min_score {min_score} (scores here run "
+                         f"from {p.score.min():g} to {p.score.max():g}). Set min_score and strong_score for this score.")
+    return kept.reset_index(drop=True)
 
 
 def best_peak_per_gene(tss: pd.DataFrame, peaks: pd.DataFrame, tss_window: int, max_summit_distance: int,

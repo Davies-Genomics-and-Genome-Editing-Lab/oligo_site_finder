@@ -1,4 +1,4 @@
-"""One TSS per gene from a GENCODE GTF.
+"""One TSS per gene from a GENCODE GTF (plain or .gz).
 
 Per gene name: the MANE Select transcript, else the longest APPRIS principal_1 transcript, else the longest
 transcript ("longest" = genomic span). Only transcript features of the chosen gene/transcript types on the chosen
@@ -7,12 +7,54 @@ Pseudoautosomal genes present on both chrX and chrY keep the chrX copy.
 """
 from __future__ import annotations
 
+import gzip
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import pandas as pd
 
 _ATTR = re.compile(r'^(\S+)\s+"([^"]*)"')
+
+
+def open_text(path):
+    """Open a plain or gzipped (.gz) text file for reading."""
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+
+
+def explain_empty(gtf: str, chromosomes: list[str], gene_type, transcript_type, n: int = 20000) -> str:
+    """Why extract_tss found no transcripts, from the first n feature lines of the GTF."""
+    chroms, feats, keys, types = Counter(), set(), set(), Counter()
+    with open_text(gtf) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 9:
+                continue
+            chroms[f[0]] += 1
+            feats.add(f[2])
+            a = _attributes(f[8])
+            keys |= set(a)
+            types[a.get("gene_type", a.get("gene_biotype", "?"))] += 1
+            if sum(chroms.values()) >= n:
+                break
+    if not chroms:
+        return "it has no GTF lines (nine tab-separated columns). Is it a GTF?"
+    names = list(chroms)[:3]
+    if not set(chroms) & set(chromosomes):
+        if not any(c.startswith("chr") for c in chroms) and any(c.startswith("chr") for c in chromosomes):
+            return (f"its chromosomes are named {names}, not chr1, chr2, ... (Ensembl style). Use a GENCODE GTF, "
+                    f"which uses chr names.")
+        return f"none of its chromosomes ({names} ...) is in the chromosomes setting ({chromosomes[:3]} ...)."
+    if "transcript" not in feats:
+        return f"it has no 'transcript' lines (its feature types include {sorted(feats)[:5]})."
+    lacking = [k for k in ("gene_name", "gene_type", "transcript_type") if k not in keys]
+    if lacking:
+        return (f"its lines lack the {', '.join(lacking)} attribute(s)"
+                + (" (an Ensembl GTF, which calls them gene_biotype and transcript_biotype)" if "gene_biotype" in keys else "")
+                + ". Use a GENCODE GTF.")
+    return (f"no transcript has gene_type {gene_type!r} and transcript_type {transcript_type!r}. Gene types in the file "
+            f"include {[t for t, _ in types.most_common(5)]}; set gene_type and transcript_type to one of these, or to null.")
 
 
 def _attributes(s: str) -> dict:
@@ -38,7 +80,7 @@ def extract_tss(gtf: str, chromosomes: list[str], gene_type: str | None = "prote
     """Return one row per gene: gene, chr, tss (0-based), strand, source, gene_id, transcript_id."""
     chroms = set(chromosomes)
     by_name = defaultdict(list)
-    with open(gtf) as fh:
+    with open_text(gtf) as fh:
         for line in fh:
             if line.startswith("#"):
                 continue

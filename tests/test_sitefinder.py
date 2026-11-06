@@ -1,4 +1,5 @@
-"""Each rule on a tiny made-up genome. Run: python -m pytest tests  (or: python tests/test_sitefinder.py)"""
+"""Each rule and each input check on a tiny made-up genome. Run: python -m pytest tests  (or: python tests/test_sitefinder.py)"""
+import gzip
 import sys
 import tempfile
 from pathlib import Path
@@ -6,8 +7,9 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import sitefinder.cli as cli  # noqa: E402
 from sitefinder.cli import run  # noqa: E402
-from sitefinder.sites import load_peaks  # noqa: E402
+from sitefinder.sites import InputError, load_peaks  # noqa: E402
 
 
 def tx(chrom, start, end, strand, gene, tid, tags=(), gene_type="protein_coding"):
@@ -160,6 +162,100 @@ def test_missing_summit_is_an_error():
             raise AssertionError("a peak file with no summit column was accepted")
 
 
+# ---- input checks: each problem stops the run with a message that names it --------------------------------------
+
+def write_inputs(tmp, rows=None):
+    """The test GTF and one peak file (s1's peaks, or the given rows) in tmp; returns a config for run()."""
+    tmp = Path(tmp)
+    (tmp / "test.gtf").write_text("\n".join(GTF) + "\n")
+    write_peaks(rows or PEAKS["s1"], tmp / "s1.bed")
+    return dict(gtf=str(tmp / "test.gtf"), peaks={"s1": str(tmp / "s1.bed")}, outdir=str(tmp / "out"))
+
+
+def error_of(cfg):
+    try:
+        run(cfg)
+    except InputError as e:
+        return str(e)
+    raise AssertionError("the run did not stop")
+
+
+def test_gzipped_gtf_reads_like_plain():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = write_inputs(tmp)
+        gz = Path(tmp) / "test.gtf.gz"
+        with gzip.open(gz, "wt") as fh:
+            fh.write("\n".join(GTF) + "\n")
+        pd.testing.assert_frame_equal(run(cfg), run(dict(cfg, gtf=str(gz))))
+
+
+def test_settings_are_checked():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = write_inputs(tmp)
+        assert "did you mean 'min_site_spacing'" in error_of(dict(cfg, min_site_spaceing=500))
+        assert "no such file" in error_of(dict(cfg, peaks={"s1": f"{tmp}/missing.bed"}))
+        assert "must set outdir" in error_of({k: v for k, v in cfg.items() if k != "outdir"})
+        assert "tss or skip" in error_of(dict(cfg, no_peak="drop"))
+
+
+def test_gtf_problems_are_named():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = write_inputs(tmp)
+        ensembl = Path(tmp) / "ensembl.gtf"
+        ensembl.write_text("\n".join(line[3:] for line in GTF) + "\n")          # chr1 -> 1
+        assert "Ensembl style" in error_of(dict(cfg, gtf=str(ensembl)))
+        assert "Gene types in the file include" in error_of(dict(cfg, gene_type="protein-coding"))
+
+
+def test_peak_file_problems_are_named():
+    with tempfile.TemporaryDirectory() as tmp:
+        assert "lack the 'chr' prefix" in error_of(write_inputs(tmp, [("1", 9900, 10200, 0.95, 10030)]))
+        assert "outside their own peak" in error_of(write_inputs(tmp, [("chr1", 9900, 10200, 0.95, 130)]))
+        cfg = write_inputs(tmp, [("chr1", 9900, 10200, 50.0, 10030)])
+        assert "not LanceOtron's 0-1 peak score" in error_of(cfg)
+        run(dict(cfg, min_score=5, strong_score=20))                            # fine once the thresholds are set
+        narrow = Path(tmp) / "x.narrowPeak"
+        narrow.write_text("chr1\t9900\t10200\tp1\t500\t.\t8.1\t12.3\t10.2\t130\n")
+        assert "MACS2 narrowPeak" in error_of(dict(cfg, peaks={"s1": str(narrow)}))
+
+
+def test_chrom_sizes_from_another_build_stop_the_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = write_inputs(tmp)
+        sizes = Path(tmp) / "sizes.txt"
+        sizes.write_text("chr1\t5000\n")                                        # A's TSS (10000) is past the end
+        assert "TSSs lie past their chromosome's end" in error_of(dict(cfg, chrom_sizes=str(sizes)))
+        sizes.write_text("".join(f"chr{c}\t{70050 if c == '1' else 10 ** 6}\n" for c in ["1", "2", "3", "4", "X", "Y"]))
+        assert "peaks run past their chromosome's end" in error_of(dict(cfg, chrom_sizes=str(sizes)))
+
+
+def test_peaks_on_another_genome_build_stop_the_run():
+    old = cli.MIN_PEAKS
+    cli.MIN_PEAKS = 1                                          # the test files are far below the real minimum
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            run(write_inputs(tmp))                             # right build: 7 TSSs hit, none once moved 1 Mb
+            moved = [(c, s + 50000, e + 50000, sc, su + 50000) for c, s, e, sc, su in PEAKS["s1"]]
+            cfg = write_inputs(tmp, moved)
+            assert "lift the peaks over" in error_of(cfg)
+            run(dict(cfg, build_check=False))                  # the user can override it
+    finally:
+        cli.MIN_PEAKS = old
+
+
+def test_gene_list_problems_are_named():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = write_inputs(tmp)
+        ids = Path(tmp) / "ids.txt"
+        ids.write_text("ENSG00000000003\nENSG00000000005\n")
+        assert "Ensembl IDs" in error_of(dict(cfg, genes=str(ids)))
+        some = Path(tmp) / "some.txt"
+        some.write_text("A\nf\nZZZ\n")
+        s = run(dict(cfg, genes=str(some)))
+        assert list(s.gene) == ["A"]
+        assert (Path(tmp) / "out" / "genes_not_found.txt").read_text().split() == ["f", "ZZZ"]
+
+
 if __name__ == "__main__":
     test_rules()
     test_shared_sites_get_one_region_and_keep_every_gene()
@@ -168,4 +264,11 @@ if __name__ == "__main__":
     test_no_peak_skip_leaves_out_genes_without_a_peak()
     test_lanceotron_files_as_they_come()
     test_missing_summit_is_an_error()
+    test_gzipped_gtf_reads_like_plain()
+    test_settings_are_checked()
+    test_gtf_problems_are_named()
+    test_peak_file_problems_are_named()
+    test_chrom_sizes_from_another_build_stop_the_run()
+    test_peaks_on_another_genome_build_stop_the_run()
+    test_gene_list_problems_are_named()
     print("all site finder tests passed")

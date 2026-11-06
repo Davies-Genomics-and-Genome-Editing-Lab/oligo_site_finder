@@ -1,6 +1,6 @@
 # oligo_site_finder example config. Paths are examples: point them at your own files.
 
-# GENCODE GTF (transcript lines with gene_name, gene_type, transcript_type and tag attributes)
+# GENCODE GTF, gzipped or not (transcript lines with gene_name, gene_type, transcript_type and tag attributes)
 gtf: /path/to/gencode.v47.primary_assembly.annotation.gtf
 
 # optional: two columns, chromosome and length (keeps TSS windows inside chromosome ends)
@@ -34,3 +34,4 @@ max_summit_distance: 1000         # ... and its summit must be within this many 
 region_length: 120                # output region, centred on the chosen site (the oligo pipeline needs 120)
 min_site_spacing: 120             # sites closer than this share one region (120 = no two regions overlap; 0 = off)
 no_peak: tss                      # genes with no peak: tss = oligo on the TSS, skip = leave them out
+build_check: true                 # stop if a peak file looks like a different genome build from the GTF
